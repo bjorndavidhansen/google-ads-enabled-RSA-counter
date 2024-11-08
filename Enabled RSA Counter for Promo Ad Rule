@@ -1,0 +1,156 @@
+// Add to CONFIG object
+const CONFIG = {
+    RSA_LIMIT: 3,
+    SPREADSHEET_ID: '1NkVD5hiTsS4b5VZfUYMsQLXWsu650EyjC5a06N7lb5g',
+    INCLUDE_ZERO_RSA_GROUPS: true,
+    AUTO_PAUSE: true,  // Toggle automatic pausing
+    PERFORMANCE_WINDOW: 'LAST_30_DAYS'  // Time window for performance analysis
+};
+
+// Add new function to get RSA performance
+function getRSAPerformance(adGroup) {
+    const rsaSelector = adGroup.ads()
+        .withCondition('Type = RESPONSIVE_SEARCH_AD')
+        .withCondition('Status = ENABLED');
+    
+    const report = AdsApp.report(
+        `SELECT AdGroupId, Id, Conversions 
+         FROM AD_PERFORMANCE_REPORT 
+         WHERE AdGroupId = ${adGroup.getId()}
+         AND AdType = RESPONSIVE_SEARCH_AD
+         AND Status = ENABLED
+         DURING ${CONFIG.PERFORMANCE_WINDOW}`
+    );
+
+    const rsaPerformance = [];
+    const rows = report.rows();
+    while (rows.hasNext()) {
+        const row = rows.next();
+        rsaPerformance.push({
+            adId: row['Id'],
+            conversions: parseFloat(row['Conversions']) || 0
+        });
+    }
+
+    return rsaPerformance;
+}
+
+// Add new function to pause worst performing RSA
+function pauseWorstPerformingRSA(adGroup) {
+    try {
+        const rsaPerformance = getRSAPerformance(adGroup);
+        
+        if (rsaPerformance.length === 0) {
+            Logger.log(`No RSA performance data found for ad group: ${adGroup.getName()}`);
+            return null;
+        }
+
+        // Sort by conversions ascending (worst performing first)
+        rsaPerformance.sort((a, b) => a.conversions - b.conversions);
+        
+        // Get the worst performing RSA
+        const worstRSA = rsaPerformance[0];
+        
+        // Pause the ad
+        const adIterator = adGroup.ads()
+            .withIds([worstRSA.adId])
+            .get();
+
+        if (adIterator.hasNext()) {
+            const ad = adIterator.next();
+            ad.pause();
+            Logger.log(`Paused RSA ${worstRSA.adId} in ad group ${adGroup.getName()} (${worstRSA.conversions} conversions)`);
+            return {
+                adId: worstRSA.adId,
+                conversions: worstRSA.conversions
+            };
+        }
+
+        return null;
+    } catch (error) {
+        Logger.log(`Error pausing RSA in ad group ${adGroup.getName()}: ${error}`);
+        return null;
+    }
+}
+
+// Modify the processAdGroups function to include performance data and pausing
+function processAdGroups(campaign, campaignData) {
+    const adGroupIterator = campaign.adGroups()
+        .withCondition('Status = ENABLED')
+        .get();
+
+    while (adGroupIterator.hasNext()) {
+        let currentAdGroup = null;
+        try {
+            currentAdGroup = adGroupIterator.next();
+            Logger.log('Processing ad group: ' + currentAdGroup.getName());
+            
+            const rsaCount = countRSAs(currentAdGroup);
+            let pausedRSAInfo = null;
+            
+            // If at capacity and auto-pause is enabled, pause worst performing RSA
+            if (rsaCount >= CONFIG.RSA_LIMIT && CONFIG.AUTO_PAUSE) {
+                pausedRSAInfo = pauseWorstPerformingRSA(currentAdGroup);
+                if (pausedRSAInfo) {
+                    rsaCount--; // Decrease count after pausing
+                }
+            }
+            
+            const adGroupData = {
+                id: currentAdGroup.getId(),
+                name: currentAdGroup.getName(),
+                rsaCount: rsaCount,
+                hasCapacity: rsaCount < CONFIG.RSA_LIMIT,
+                capacityRemaining: CONFIG.RSA_LIMIT - rsaCount,
+                status: getRSAStatus(rsaCount),
+                pausedRSA: pausedRSAInfo ? {
+                    id: pausedRSAInfo.adId,
+                    conversions: pausedRSAInfo.conversions
+                } : null
+            };
+
+            campaignData.adGroups.push(adGroupData);
+            updateCampaignSummary(campaignData, adGroupData);
+        } catch (error) {
+            Logger.log(`Error processing ad group: ${error}`);
+        }
+    }
+}
+
+// Modify writeToSpreadsheet to include paused RSA information
+function writeToSpreadsheet(accountAudit) {
+    // ... (previous spreadsheet setup code) ...
+
+    // Update headers to include paused RSA information
+    const headers = [
+        'Campaign Name',
+        'Campaign ID',
+        'Ad Group Name',
+        'Ad Group ID',
+        'RSA Count',
+        'Available Slots',
+        'Status',
+        'Paused RSA ID',
+        'Paused RSA Conversions'
+    ];
+    
+    // Update row data preparation
+    let rowData = [];
+    accountAudit.campaigns.forEach(campaign => {
+        campaign.adGroups.forEach(adGroup => {
+            rowData.push([
+                campaign.name,
+                campaign.id,
+                adGroup.name,
+                adGroup.id,
+                adGroup.rsaCount,
+                CONFIG.RSA_LIMIT - adGroup.rsaCount,
+                adGroup.status,
+                adGroup.pausedRSA ? adGroup.pausedRSA.id : 'None',
+                adGroup.pausedRSA ? adGroup.pausedRSA.conversions : 'N/A'
+            ]);
+        });
+    });
+
+    // ... (rest of spreadsheet formatting code) ...
+}
